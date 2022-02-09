@@ -1,0 +1,232 @@
+#-------------------------------
+#----   "Final Project: Forecasting Ecommerce retail sales"
+#-------------------------------
+
+#### Required Packages
+library(fpp3)
+library(tsibble)
+library(tidyverse)
+library(forecast)
+
+
+# ETS
+
+### Loading Data
+
+setwd("/Users/.../STAT T680/Final Project/E-Commerce")
+data <- read.csv("2021 ECOMNSA.csv") 
+
+### Preparation
+ecom <- data %>% 
+  mutate(Quarter = yearquarter(date))%>%
+  mutate (Sales = value) %>% 
+  select (Quarter, Sales) %>%
+  as_tsibble(index=Quarter)
+
+### Visualization
+
+ecom %>%
+  autoplot() + labs(y = "Sales (in Millions) ")
+
+ecom %>%
+  gg_season()
+
+ecom %>%
+  gg_subseries()
+
+### STL Decomposition
+ecom %>%
+  model(STL(Sales)) %>%
+  components %>%
+  autoplot()
+
+ecom %>%
+  features(Sales, features = guerrero)
+
+#The additive model is useful when the seasonal variation is relatively constant over time.
+
+#The multiplicative model is useful when the seasonal variation increases over time.
+
+### Training & Testing Set
+train <- ecom %>%
+  filter_index(. ~ "2019 Q3")
+
+test <- ecom %>%
+  filter_index("2019 Q4" ~.)
+
+## ETS Model Development
+
+fit_ets <- train %>% model(ETS(log(Sales)))
+report(fit_ets)
+
+components(fit_ets) %>%
+  autoplot() +
+  labs(title = "ETS(A,Ad,A) components")
+
+### Check Residuals
+fit_ets %>%
+  gg_tsresiduals()
+
+augment(fit_ets) %>%
+  features(.innov, ljung_box)
+
+### Forecast & Performance Metrics
+bind_rows(
+  fit_ets %>%
+    accuracy(), fit_ets %>%
+    forecast(h = 8) %>%
+    accuracy(ecom)) %>%
+  select(-ME, -MPE, -ACF1)
+
+### Forecast Plot
+ecom %>%
+  model(ETS(log(Sales))) %>%
+  forecast(h=8) %>%
+  autoplot(ecom) + 
+  labs(title = "ETS Model Plot For E-Commerce Sales in USA",
+       y = "Sales (in Millions)")
+
+# ARIMA
+data <- read.csv("2021 ECOMNSA.csv") 
+
+### Preparation & Transformation
+
+data <- data %>% 
+  rename(Sales = value) %>% 
+  mutate(Quarter = yearquarter(date)) %>% 
+  select(Quarter, Sales) %>%
+  as_tsibble(index=Quarter)
+
+### Training & Testing Set
+
+train <- data %>%
+  filter_index(~ "2019 Q3")
+
+test <- data %>%
+  filter_index("2019 Q4" ~.)
+
+### Visualization
+autoplot(train, Sales) + labs(y = "Millions")
+
+train %>%
+  gg_subseries(Sales)
+
+train %>%
+  gg_season(Sales)
+
+### STL Decomposition
+
+train %>%
+  model(STL(Sales)) %>% components() %>% autoplot()
+
+# We see rising trend. Subtle seasonality is observed in the years before 2010.
+
+# After 2010, seasonality is more clear with pikes in Q4 and trough in Q1
+
+# Seasonality is not constant and show large variation over time, thus suggesting transformation
+
+### Transformation
+
+train %>%
+  features(Sales, features = guerrero)
+train %>%
+  autoplot(log(Sales))
+train %>%
+  autoplot(box_cox(Sales,-0.0639))
+
+# Since the optimal lambda is very close to 0 and there is not much difference
+
+# seen in plots of both log transformation and box_cox transformation, we decide
+
+# to go with log transformation
+
+### Stationary
+
+train %>%
+  features(log(Sales), feat_stl) %>%
+  select(trend_strength, seasonal_strength_year)
+
+# The e-commerce sales data is clearly trended and seasonal, as confirmed by both
+# time series plot and close to 1 trend and seasonal strength values.
+# Since seasonal strength is strong, we take seasonal difference first.
+
+train %>%
+  autoplot(log(Sales) %>%
+             difference(4))
+
+# Resulted plot suggests that the data is still not stationary as trend is visibly seen.
+# We take another first difference to remove remaining trend.
+
+train %>%
+  autoplot(log(Sales) %>%
+             difference(4) %>%
+             difference(1))
+
+train %>%
+  mutate(Sales_log = log(Sales)) %>% 
+  mutate(ssdiff = difference(Sales_log,4)) %>% 
+  mutate(diff = difference(ssdiff)) %>%
+  features(diff, unitroot_kpss)
+# After transformation, data is now stationary and non-seasonal as confirmed by
+# the plot and KPSS test with p-value larger than 0.05, suggesting that there
+# is not enough evidence to support the hypothesis that data is non-stationary.
+
+## ARIMA Model Development
+
+### ARIMA(1,0,0)(0,1,0)[4]
+
+train %>%
+  gg_tsdisplay(difference(log(Sales),4), plot_type = 'partial', lag_max = 36)
+
+### ARIMA(0,1,1)(0,1,1)[4]
+
+train %>%
+  gg_tsdisplay(difference(difference(log(Sales),4)), plot_type = 'partial', lag_max = 36)
+
+fit <- train %>% 
+  model(arima100010 = ARIMA(log(Sales) ~ pdq(1,0,0) + PDQ(0,1,0)),
+        arima011011 = ARIMA(log(Sales) ~ pdq(0,1,1) + PDQ(0,1,1)),
+        stepwise = ARIMA(log(Sales)),
+        nostep = ARIMA(log(Sales), stepwise = FALSE, approximation = FALSE))
+
+fit %>%
+  select(stepwise) %>%
+  report()
+
+fit %>%
+  select(nostep) %>%
+  report()
+
+# Because stepwise and nostep models are the same, we refit model with one best model
+
+fit <- train %>% 
+  model(
+    arima100010 = ARIMA(log(Sales) ~ pdq(1,0,0) + PDQ(0,1,0)),
+    arima011011 = ARIMA(log(Sales) ~ pdq(0,1,1) + PDQ(0,1,1)),
+    auto = ARIMA(log(Sales), stepwise = FALSE, approximation = FALSE)
+  )
+
+fit %>% report()
+# auto model produces the best fit with lowest AICc
+
+### Residual
+
+fit %>% select(auto) %>% gg_tsresiduals()
+augment(fit) %>% features(.innov, ljung_box) 
+
+# residuals produced by auto model resembles white noise
+
+### Forecasting
+
+fc <- fit %>% forecast(h=8)
+
+fc %>%
+  autoplot(data, level=NULL)
+
+fc %>%
+  accuracy(test)
+
+# auto model produces the lowest RMSE as well as closest point forecasts to
+# the test set and thus the best forecast.
+
+save.image(file="GP.RData")
